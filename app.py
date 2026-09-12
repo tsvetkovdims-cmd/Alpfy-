@@ -22,7 +22,7 @@ wiki = wikipediaapi.Wikipedia(
 
 history = {}
 
-TIME_TRIGGERS = ["который час", "сколько времени", "текущее время", "время сейчас", "время в бишкеке"]
+TIME_TRIGGERS = ["который час", "сколько времени", "текущее время", "время сейчас", "время в бишкеке"] 
 WIKI_TRIGGERS = [
     "кто такой", "кто такая", "кто такое",
     "что такое", "что за",
@@ -136,10 +136,7 @@ async def describe_image(image_bytes):
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     url = "https://api.groq.com/openai/v1/chat/completions"
     payload = {
-"model": (
-    "meta-llama/"
-    "llama-4-maverick-17b-128e-instruct"
-),
+"model": "qwen/qwen3.6-27b",
         "messages": [
             {
                 "role": "user",
