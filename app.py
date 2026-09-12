@@ -1,7 +1,6 @@
 import asyncio
 import os
 import random
-from flask import Flask
 from aiogram import Bot, Dispatcher, types
 import aiohttp
 import wikipediaapi
@@ -41,6 +40,10 @@ def search_wiki(query):
 @dp.message()
 async def reply(message: types.Message):
     user_id = message.from_user.id
+
+    if not message.text:
+        return
+
     text_lower = message.text.lower()
 
     if user_id not in history:
@@ -60,10 +63,10 @@ async def reply(message: types.Message):
         await message.answer(wiki_result)
         history[user_id].append({"role": "user", "content": message.text})
         history[user_id].append({"role": "assistant", "content": wiki_result})
-        history[user_id] = history[user_id][-50:]
+        history[user_id] = history[user_id][-15:]
     else:
         history[user_id].append({"role": "user", "content": message.text})
-        history[user_id] = history[user_id][-50:]
+        history[user_id] = history[user_id][-15:]
 
         await bot.send_chat_action(message.chat.id, "typing")
         await asyncio.sleep(random.uniform(3, 5))
@@ -93,18 +96,9 @@ async def reply(message: types.Message):
 
         await message.answer(answer)
 
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Bot is running"
-
-def run_bot():
-    asyncio.run(dp.start_polling(bot))
+async def main():
+    print("Бот запущен...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    import threading
-    thread = threading.Thread(target=run_bot)
-    thread.start()
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    asyncio.run(main())
