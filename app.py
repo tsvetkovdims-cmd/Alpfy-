@@ -6,6 +6,7 @@ import aiohttp
 import wikipediaapi
 from datetime import datetime, timezone, timedelta
 import xml.etree.ElementTree as ET
+from urllib.parse import quote
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_KEY")
@@ -20,6 +21,7 @@ wiki = wikipediaapi.Wikipedia(
 
 history = {}
 
+# --- Триггеры ---
 TIME_TRIGGERS = ["который час", "сколько времени", "текущее время", "время сейчас", "время в бишкеке"]
 WIKI_TRIGGERS = [
     "кто такой", "кто такая", "кто такое",
@@ -31,6 +33,7 @@ WIKI_TRIGGERS = [
 WEATHER_TRIGGERS = ["погода", "погоду", "температура", "сколько градусов"]
 CURRENCY_TRIGGERS = ["курс", "доллар", "валюта", "сом", "евро", "рубль"]
 TRANSLATE_TRIGGERS = ["переведи", "перевод", "как будет"]
+IMAGE_TRIGGERS = ["нарисуй", "сгенерируй картинку", "нарисуй мне", "сгенерируй"]
 
 CITIES = {
     "бишкек": (42.87, 74.59),
@@ -116,12 +119,20 @@ async def get_currency():
     return result
 
 async def translate_text(text, target_lang):
-    url = "https://api.mymemory.translated.net/get"
-    params = {"q": text, "langpair": f"ru|{target_lang}"}
+    url = "https://translate.argosopentech.com/translate"
+    payload = {"q": text, "source": "ru", "target": target_lang, "format": "text"}
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params) as resp:
+        async with session.post(url, json=payload) as resp:
             data = await resp.json()
-    return data.get("responseData", {}).get("translatedText", "Не удалось перевести.")
+    return data.get("translatedText", "Не удалось перевести. Попробуй позже.")
+
+async def generate_image(prompt):
+    """Генерирует картинку через Pollinations.ai и возвращает URL."""
+    # Кодируем промпт для URL
+    encoded_prompt = quote(prompt)
+    # Используем бесплатный эндпоинт без ключа
+    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&safe=true"
+    return image_url
 
 @dp.message()
 async def reply(message: types.Message):
@@ -184,7 +195,6 @@ async def reply(message: types.Message):
             if target_lang is None:
                 await message.answer("❌ Укажи язык: английский, киргизский, немецкий, французский и т.д.")
                 return
-            # Берём текст после двоеточия
             if ":" in message.text:
                 text_to_translate = message.text.split(":", 1)[1].strip()
             else:
@@ -202,6 +212,31 @@ async def reply(message: types.Message):
             history[user_id].append({"role": "user", "content": message.text})
             history[user_id].append({"role": "assistant", "content": answer})
             history[user_id] = history[user_id][-15:]
+            return
+
+    # Проверка на генерацию картинок
+    for trigger in IMAGE_TRIGGERS:
+        if trigger in text_lower:
+            # Достаём промпт после триггера
+            prompt = message.text
+            for t in IMAGE_TRIGGERS:
+                prompt = prompt.lower().replace(t, "")
+            prompt = prompt.strip()
+            if not prompt:
+                await message.answer("❌ Напиши, что нарисовать. Пример: «Нарисуй кота в космосе»")
+                return
+            
+            await bot.send_chat_action(message.chat.id, "upload_photo")
+            await asyncio.sleep(random.uniform(2, 4))
+            
+            image_url = await generate_image(prompt)
+            try:
+                await message.answer_photo(image_url, caption=f"🎨 {prompt}")
+                history[user_id].append({"role": "user", "content": message.text})
+                history[user_id].append({"role": "assistant", "content": f"Нарисовал: {prompt}"})
+                history[user_id] = history[user_id][-15:]
+            except Exception as e:
+                await message.answer(f"❌ Не удалось отправить картинку: {str(e)[:200]}")
             return
 
     # Проверка на Википедию
