@@ -4,6 +4,8 @@ import random
 from aiogram import Bot, Dispatcher, types
 import aiohttp
 import wikipediaapi
+from datetime import datetime, timezone, timedelta
+import xml.etree.ElementTree as ET
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_KEY")
@@ -12,11 +14,13 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 wiki = wikipediaapi.Wikipedia(
-    user_agent='AlpfyBot/1.0 (https://t.me/AlpfyHelper_bot)',
+    user_agent='QBot/1.0 (https://t.me/AlpfyHelper_bot)',
     language='ru'
 )
 
 history = {}
+
+TIME_TRIGGERS = ["который час", "сколько времени", "текущее время", "время сейчас"]
 
 WIKI_TRIGGERS = [
     "кто такой", "кто такая", "кто такое",
@@ -28,7 +32,8 @@ WIKI_TRIGGERS = [
 
 WEATHER_TRIGGERS = ["погода", "погоду", "температура", "сколько градусов"]
 
-# Координаты городов (можно добавлять свои)
+CURRENCY_TRIGGERS = ["курс", "доллар", "валюта", "сом", "евро", "рубль"]
+
 CITIES = {
     "бишкек": (42.87, 74.59),
     "москва": (55.75, 37.62),
@@ -50,11 +55,14 @@ def search_wiki(query):
     except Exception as e:
         return f"Ошибка поиска: {str(e)}"
 
+def get_time():
+    bishkek_time = datetime.now(timezone.utc) + timedelta(hours=6)
+    return bishkek_time.strftime("🕐 Сейчас в Бишкеке: %H:%M (%d.%m.%Y)")
+
 async def get_weather(city):
     city_lower = city.lower().strip()
     if city_lower not in CITIES:
         return f"❌ Я не знаю город «{city}». Попробуй: Бишкек, Москва, Алматы, Ташкент, Дубай, Нью-Йорк, Лондон."
-
     lat, lon = CITIES[city_lower]
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
@@ -62,17 +70,13 @@ async def get_weather(city):
         f"&current=temperature_2m,weather_code,wind_speed_10m"
         f"&timezone=auto"
     )
-
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             data = await resp.json()
-
     current = data.get("current", {})
     temp = current.get("temperature_2m", "?")
     wind = current.get("wind_speed_10m", "?")
     code = current.get("weather_code", 0)
-
-    # Расшифровка кода погоды
     weather_codes = {
         0: "Ясно ☀️", 1: "Почти ясно 🌤", 2: "Переменная облачность ⛅",
         3: "Пасмурно ☁️", 45: "Туман 🌫", 48: "Иней 🌫",
@@ -83,13 +87,28 @@ async def get_weather(city):
         95: "Гроза ⛈", 96: "Гроза с градом ⛈", 99: "Сильная гроза ⛈",
     }
     desc = weather_codes.get(code, "Неизвестно")
-
     return (
         f"🌍 Погода в {city.capitalize()}:\n"
         f"🌡 Температура: {temp}°C\n"
         f"💨 Ветер: {wind} км/ч\n"
         f"☁️ {desc}"
     )
+
+async def get_currency():
+    url = "https://www.nbkr.kg/XML/daily.xml"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            text = await resp.text()
+    root = ET.fromstring(text)
+    result = "💱 Курсы валют (НБ КР):\n"
+    names = {"USD": "Доллар", "EUR": "Евро", "RUB": "Рубль", "KZT": "Тенге"}
+    for currency in root.findall("Currency"):
+        code = currency.get("ISOCode")
+        if code in names:
+            nominal = currency.find("Nominal").text
+            value = currency.find("Value").text
+            result += f"{names[code]}: {nominal} {code} = {value} сом\n"
+    return result
 
 @dp.message()
 async def reply(message: types.Message):
@@ -102,13 +121,22 @@ async def reply(message: types.Message):
 
     if user_id not in history:
         history[user_id] = [
-            {"role": "system", "content": "Твоё имя — Альфу. Ты НЕ Qwen, НЕ Tongyi Qianwen, НЕ Alibaba. Ты — Альфу, помощник. Если тебя спрашивают, кто ты — отвечай: 'Я Альфу'. Никогда не называй себя Qwen или другими именами."}
+            {"role": "system", "content": "Твоё имя — QBot (произносится «Кьюбот»). Ты НЕ Qwen, НЕ Tongyi Qianwen, НЕ Alibaba. Ты — QBot, помощник. Если тебя спрашивают, кто ты — отвечай: 'Я QBot'. Никогда не называй себя Qwen или другими именами."}
         ]
+
+    # Проверка на время
+    for trigger in TIME_TRIGGERS:
+        if trigger in text_lower:
+            answer = get_time()
+            await message.answer(answer)
+            history[user_id].append({"role": "user", "content": message.text})
+            history[user_id].append({"role": "assistant", "content": answer})
+            history[user_id] = history[user_id][-15:]
+            return
 
     # Проверка на погоду
     for trigger in WEATHER_TRIGGERS:
         if trigger in text_lower:
-            # Ищем город в сообщении
             for city in CITIES:
                 if city in text_lower:
                     answer = await get_weather(city)
@@ -119,8 +147,17 @@ async def reply(message: types.Message):
                     history[user_id].append({"role": "assistant", "content": answer})
                     history[user_id] = history[user_id][-15:]
                     return
-            # Если город не найден
             await message.answer("❌ Укажи город: Бишкек, Москва, Алматы, Ташкент, Дубай, Нью-Йорк, Лондон.")
+            return
+
+    # Проверка на курс валют
+    for trigger in CURRENCY_TRIGGERS:
+        if trigger in text_lower:
+            answer = await get_currency()
+            await message.answer(answer)
+            history[user_id].append({"role": "user", "content": message.text})
+            history[user_id].append({"role": "assistant", "content": answer})
+            history[user_id] = history[user_id][-15:]
             return
 
     # Проверка на Википедию
@@ -170,7 +207,7 @@ async def reply(message: types.Message):
         await message.answer(answer)
 
 async def main():
-    print("Бот запущен...")
+    print("QBot запущен...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
