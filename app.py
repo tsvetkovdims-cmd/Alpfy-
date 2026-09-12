@@ -20,8 +20,7 @@ wiki = wikipediaapi.Wikipedia(
 
 history = {}
 
-TIME_TRIGGERS = ["который час", "сколько времени", "текущее время", "время сейчас"]
-
+TIME_TRIGGERS = ["который час", "сколько времени", "текущее время", "время сейчас", "время в бишкеке"]
 WIKI_TRIGGERS = [
     "кто такой", "кто такая", "кто такое",
     "что такое", "что за",
@@ -29,10 +28,9 @@ WIKI_TRIGGERS = [
     "информация о", "информация про",
     "найди про", "найди о"
 ]
-
 WEATHER_TRIGGERS = ["погода", "погоду", "температура", "сколько градусов"]
-
 CURRENCY_TRIGGERS = ["курс", "доллар", "валюта", "сом", "евро", "рубль"]
+TRANSLATE_TRIGGERS = ["переведи", "перевод", "как будет"]
 
 CITIES = {
     "бишкек": (42.87, 74.59),
@@ -42,6 +40,13 @@ CITIES = {
     "дубай": (25.20, 55.27),
     "нью-йорк": (40.71, -74.00),
     "лондон": (51.51, -0.13),
+}
+
+LANGS = {
+    "английский": "en", "русский": "ru", "киргизский": "ky",
+    "казахский": "kk", "узбекский": "uz", "немецкий": "de",
+    "французский": "fr", "испанский": "es", "китайский": "zh",
+    "турецкий": "tr", "арабский": "ar", "японский": "ja",
 }
 
 def search_wiki(query):
@@ -110,6 +115,14 @@ async def get_currency():
             result += f"{names[code]}: {nominal} {code} = {value} сом\n"
     return result
 
+async def translate_text(text, target_lang):
+    url = "https://api.mymemory.translated.net/get"
+    params = {"q": text, "langpair": f"ru|{target_lang}"}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params) as resp:
+            data = await resp.json()
+    return data.get("responseData", {}).get("translatedText", "Не удалось перевести.")
+
 @dp.message()
 async def reply(message: types.Message):
     user_id = message.from_user.id
@@ -155,6 +168,37 @@ async def reply(message: types.Message):
         if trigger in text_lower:
             answer = await get_currency()
             await message.answer(answer)
+            history[user_id].append({"role": "user", "content": message.text})
+            history[user_id].append({"role": "assistant", "content": answer})
+            history[user_id] = history[user_id][-15:]
+            return
+
+    # Проверка на перевод
+    for trigger in TRANSLATE_TRIGGERS:
+        if trigger in text_lower:
+            target_lang = None
+            for lang_name, lang_code in LANGS.items():
+                if lang_name in text_lower:
+                    target_lang = lang_code
+                    break
+            if target_lang is None:
+                await message.answer("❌ Укажи язык: английский, киргизский, немецкий, французский и т.д.")
+                return
+            # Берём текст после двоеточия
+            if ":" in message.text:
+                text_to_translate = message.text.split(":", 1)[1].strip()
+            else:
+                text_to_translate = message.text
+                for t in TRANSLATE_TRIGGERS:
+                    text_to_translate = text_to_translate.lower().replace(t, "")
+                for lang_name in LANGS:
+                    text_to_translate = text_to_translate.lower().replace(lang_name, "")
+                text_to_translate = text_to_translate.strip()
+            if not text_to_translate:
+                await message.answer("❌ Напиши текст для перевода. Пример: «Переведи на английский: Привет»")
+                return
+            answer = await translate_text(text_to_translate, target_lang)
+            await message.answer(f"🌐 Перевод:\n{answer}")
             history[user_id].append({"role": "user", "content": message.text})
             history[user_id].append({"role": "assistant", "content": answer})
             history[user_id] = history[user_id][-15:]
