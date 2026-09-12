@@ -48,7 +48,7 @@ async def reply(message: types.Message):
 
     if user_id not in history:
         history[user_id] = [
-            {"role": "system", "content": "Ты — Альфу, дружелюбный помощник. Отвечай на русском, коротко и по делу."}
+            {"role": "system", "content": "Твоё имя — Альфу. Ты НЕ Qwen, НЕ Tongyi Qianwen, НЕ Alibaba. Ты — Альфу, помощник. Если тебя спрашивают, кто ты — отвечай: 'Я Альфу'. Никогда не называй себя Qwen или другими именами."}
         ]
 
     wiki_result = None
