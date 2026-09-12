@@ -7,6 +7,7 @@ import wikipediaapi
 from datetime import datetime, timezone, timedelta
 import xml.etree.ElementTree as ET
 from urllib.parse import quote
+import base64
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_KEY")
@@ -21,7 +22,6 @@ wiki = wikipediaapi.Wikipedia(
 
 history = {}
 
-# --- Триггеры ---
 TIME_TRIGGERS = ["который час", "сколько времени", "текущее время", "время сейчас", "время в бишкеке"]
 WIKI_TRIGGERS = [
     "кто такой", "кто такая", "кто такое",
@@ -127,16 +127,52 @@ async def translate_text(text, target_lang):
     return data.get("translatedText", "Не удалось перевести. Попробуй позже.")
 
 async def generate_image(prompt):
-    """Генерирует картинку через Pollinations.ai и возвращает URL."""
-    # Кодируем промпт для URL
     encoded_prompt = quote(prompt)
-    # Используем бесплатный эндпоинт без ключа
     image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&safe=true"
     return image_url
+
+async def describe_image(image_bytes):
+    """Отправляет картинку в Groq Vision и получает описание."""
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    payload = {
+        "model": "llama-3.2-11b-vision-preview",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Опиши, что на этой картинке. Кратко, на русском."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+                ]
+            }
+        ],
+        "max_tokens": 500
+    }
+    headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, headers=headers) as resp:
+            data = await resp.json()
+    if "choices" in data:
+        return data["choices"][0]["message"]["content"]
+    return f"❌ Не удалось описать фото: {str(data)[:200]}"
 
 @dp.message()
 async def reply(message: types.Message):
     user_id = message.from_user.id
+
+    # Обработка фото
+    if message.photo:
+        await bot.send_chat_action(message.chat.id, "typing")
+        # Берём самое большое фото
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file.file_path}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url) as resp:
+                image_bytes = await resp.read()
+        description = await describe_image(image_bytes)
+        await message.answer(f"🖼 Что я вижу на фото:\n\n{description}")
+        return
 
     if not message.text:
         return
@@ -217,7 +253,6 @@ async def reply(message: types.Message):
     # Проверка на генерацию картинок
     for trigger in IMAGE_TRIGGERS:
         if trigger in text_lower:
-            # Достаём промпт после триггера
             prompt = message.text
             for t in IMAGE_TRIGGERS:
                 prompt = prompt.lower().replace(t, "")
@@ -225,10 +260,8 @@ async def reply(message: types.Message):
             if not prompt:
                 await message.answer("❌ Напиши, что нарисовать. Пример: «Нарисуй кота в космосе»")
                 return
-            
             await bot.send_chat_action(message.chat.id, "upload_photo")
             await asyncio.sleep(random.uniform(2, 4))
-            
             image_url = await generate_image(prompt)
             try:
                 await message.answer_photo(image_url, caption=f"🎨 {prompt}")
