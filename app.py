@@ -1,8 +1,6 @@
 import asyncio
 import os
 import random
-import json
-import sqlite3
 from aiogram import Bot, Dispatcher, types
 import aiohttp
 import wikipediaapi
@@ -22,62 +20,86 @@ wiki = wikipediaapi.Wikipedia(
     language='ru'
 )
 
-# --- БАЗА ДАННЫХ (постоянная память) ---
-DB_PATH = "qbot_memory.db"
+history = {}
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS memory (
-        user_id INTEGER,
-        role TEXT,
-        content TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )""")
-    conn.commit()
-    conn.close()
+# --- РАСШИРЕННЫЕ ТРИГГЕРЫ ---
+TIME_TRIGGERS = ["который час", "сколько времени", "текущее время", "время сейчас", "время в бишкеке", "сколько сейчас времени", "время"]
+WIKI_TRIGGERS = ["кто такой", "кто такая", "кто такое", "что такое", "что за", "расскажи про", "расскажи о", "расскажи", "информация о", "информация про", "информация", "найди про", "найди о", "найди", "википедия", "вики", "статья", "объясни", "объясни про", "определение"]
+WEATHER_TRIGGERS = ["погода", "погоду", "температура", "сколько градусов", "погодка", "холодно", "тепло", "дождь", "снег", "ветер", "климат"]
+CURRENCY_TRIGGERS = ["курс", "доллар", "валюта", "сом", "евро", "рубль", "тенге", "бакс", "цена доллара", "курс валют", "обмен"]
+TRANSLATE_TRIGGERS = ["переведи", "перевод", "как будет", "перевести"]
+IMAGE_TRIGGERS = ["нарисуй", "сгенерируй картинку", "нарисуй мне", "сгенерируй", "создай", "создай изображение", "нарисуй картинку", "изобрази"]
+SEARCH_TRIGGERS = ["найди в интернете", "поищи в интернете", "погугли", "загугли", "найди в сети", "поищи в сети", "найди онлайн", "поиск в интернете", "что пишут в интернете", "найди в гугле"]
 
-def save_message(user_id, role, content):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT INTO memory (user_id, role, content) VALUES (?, ?, ?)",
-              (user_id, role, content))
-    conn.commit()
-    conn.close()
+CITIES = {
+    "бишкек": (42.87, 74.59),
+    "москва": (55.75, 37.62),
+    "алматы": (43.25, 76.91),
+    "ташкент": (41.31, 69.24),
+    "дубай": (25.20, 55.27),
+    "нью-йорк": (40.71, -74.00),
+    "лондон": (51.51, -0.13),
+    "астана": (51.16, 71.43),
+}
 
-def get_history(user_id, limit=15):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""SELECT role, content FROM memory
-                 WHERE user_id = ?
-                 ORDER BY id DESC LIMIT ?""", (user_id, limit))
-    rows = c.fetchall()
-    conn.close()
-    return [{"role": r, "content": c} for r, c in reversed(rows)]
+LANGS = {
+    "английский": "en", "русский": "ru", "киргизский": "ky",
+    "казахский": "kk", "узбекский": "uz", "немецкий": "de",
+    "французский": "fr", "испанский": "es", "китайский": "zh",
+    "турецкий": "tr", "арабский": "ar", "японский": "ja",
+}
 
-init_db()def get_time():
+def search_wiki(query):
+    try:
+        for trigger in WIKI_TRIGGERS:
+            query = query.lower().replace(trigger, "").strip()
+        if not query:
+            return None
+        page = wiki.page(query)
+        if not page.exists():
+            return None
+        return f"📖 {page.title}:\n\n{page.summary[:700]}"
+    except Exception as e:
+        return f"Ошибка поиска: {str(e)}"
+
+def get_time():
     bishkek_time = datetime.now(timezone.utc) + timedelta(hours=6)
     return bishkek_time.strftime("🕐 Сейчас в Бишкеке: %H:%M (%d.%m.%Y)")
 
 async def get_weather(city):
-    CITIES = {
-        "бишкек": (42.87, 74.59), "москва": (55.75, 37.62),
-        "алматы": (43.25, 76.91), "ташкент": (41.31, 69.24),
-        "дубай": (25.20, 55.27), "нью-йорк": (40.71, -74.00),
-        "лондон": (51.51, -0.13),
-    }
     city_lower = city.lower().strip()
     if city_lower not in CITIES:
-        return f"❌ Не знаю город «{city}». Попробуй: Бишкек, Москва, Алматы."
+        return f"❌ Я не знаю город «{city}». Попробуй: Бишкек, Москва, Алматы, Ташкент, Дубай, Нью-Йорк, Лондон, Астана."
     lat, lon = CITIES[city_lower]
-    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code,wind_speed_10m&timezone=auto"
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?"
+        f"latitude={lat}&longitude={lon}"
+        f"&current=temperature_2m,weather_code,wind_speed_10m"
+        f"&timezone=auto"
+    )
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             data = await resp.json()
-    cur = data.get("current", {})
-    temp = cur.get("temperature_2m", "?")
-    wind = cur.get("wind_speed_10m", "?")
-    return f"🌍 Погода в {city.capitalize()}:\n🌡 {temp}°C\n💨 Ветер: {wind} км/ч"
+    current = data.get("current", {})
+    temp = current.get("temperature_2m", "?")
+    wind = current.get("wind_speed_10m", "?")
+    code = current.get("weather_code", 0)
+    weather_codes = {
+        0: "Ясно ☀️", 1: "Почти ясно 🌤", 2: "Переменная облачность ⛅",
+        3: "Пасмурно ☁️", 45: "Туман 🌫", 48: "Иней 🌫",
+        51: "Морось 🌦", 53: "Морось 🌦", 55: "Морось 🌦",
+        61: "Дождь 🌧", 63: "Дождь 🌧", 65: "Сильный дождь 🌧",
+        71: "Снег ❄️", 73: "Снег ❄️", 75: "Сильный снег ❄️",
+        80: "Ливень 🌦", 81: "Ливень 🌦", 82: "Сильный ливень ⛈",
+        95: "Гроза ⛈", 96: "Гроза с градом ⛈", 99: "Сильная гроза ⛈",
+    }
+    desc = weather_codes.get(code, "Неизвестно")
+    return (
+        f"🌍 Погода в {city.capitalize()}:\n"
+        f"🌡 Температура: {temp}°C\n"
+        f"💨 Ветер: {wind} км/ч\n"
+        f"☁️ {desc}"
+    )
 
 async def get_currency():
     url = "https://www.nbkr.kg/XML/daily.xml"
@@ -95,50 +117,47 @@ async def get_currency():
             result += f"{names[code]}: {nominal} {code} = {value} сом\n"
     return result
 
-def search_wiki(query):
-    try:
-        page = wiki.page(query)
-        if not page.exists():
-            return None
-        return f"📖 {page.title}:\n\n{page.summary[:700]}"
-    except:
-        return None
-
-async def search_web(query):
-    try:
-        from duckduckgo_search import DDGS
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=3))
-        if not results:
-            return "Ничего не нашёл."
-        text = "🔍 Результаты поиска:\n\n"
-        for r in results:
-            text += f"• {r['title']}\n{r['body'][:200]}\n{r['href']}\n\n"
-        return text
-    except Exception as e:
-        return f"Ошибка поиска: {str(e)}"
-
 async def translate_text(text, target_lang):
     url = "https://translate.argosopentech.com/translate"
     payload = {"q": text, "source": "ru", "target": target_lang, "format": "text"}
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload) as resp:
             data = await resp.json()
-    return data.get("translatedText", "Не удалось перевести.")
+    return data.get("translatedText", "Не удалось перевести. Попробуй позже.")
 
 async def generate_image(prompt):
-    encoded = quote(prompt)
-    return f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&safe=true"
+    encoded_prompt = quote(prompt)
+    return f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&safe=true"
+
+async def search_web(query):
+    """Поиск в интернете через DuckDuckGo."""
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=3))
+        if not results:
+            return "❌ Ничего не нашёл."
+        text = "🔍 Результаты поиска:\n\n"
+        for r in results:
+            text += f"• {r['title']}\n{r['body'][:250]}\n{r['href']}\n\n"
+        return text
+    except Exception as e:
+        return f"❌ Ошибка поиска: {str(e)[:200]}"
 
 async def describe_image(image_bytes):
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     url = "https://api.groq.com/openai/v1/chat/completions"
     payload = {
         "model": "qwen/qwen3.6-27b",
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": "Опиши, что на этой картинке. Кратко, на русском."},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
-        ]}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Опиши, что на этой картинке. Кратко, на русском."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+                ]
+            }
+        ],
         "max_tokens": 500
     }
     headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
@@ -150,122 +169,9 @@ async def describe_image(image_bytes):
         if "<think>" in answer:
             answer = answer.split("</think>")[-1].strip()
         return answer
-    return f"❌ Не удалось описать фото."# --- ОПИСАНИЕ ИНСТРУМЕНТОВ ДЛЯ МОДЕЛИ ---
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_time",
-            "description": "Показать текущее время в Бишкеке.",
-            "parameters": {"type": "object", "properties": {}}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Показать погоду в городе.",
-            "parameters": {
-                "type": "object",
-                "properties": {"city": {"type": "string", "description": "Название города"}},
-                "required": ["city"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_currency",
-            "description": "Показать курсы валют Нацбанка КР.",
-            "parameters": {"type": "object", "properties": {}}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_wiki",
-            "description": "Найти статью в Википедии по теме.",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string", "description": "Тема статьи"}},
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_web",
-            "description": "Найти информацию в интернете (свежие данные, новости).",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string", "description": "Поисковый запрос"}},
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "translate_text",
-            "description": "Перевести текст на другой язык.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "Текст для перевода"},
-                    "target_lang": {"type": "string", "description": "Код языка: en, de, fr, ky, kk, uz, zh, tr, ar, ja, es"}
-                },
-                "required": ["text", "target_lang"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "generate_image",
-            "description": "Сгенерировать картинку по описанию.",
-            "parameters": {
-                "type": "object",
-                "properties": {"prompt": {"type": "string", "description": "Описание картинки"}},
-                "required": ["prompt"]
-            }
-        }
-    }
-]
+    return f"❌ Не удалось описать фото: {str(data)[:200]}"
 
-SYSTEM_PROMPT = """Ты — QBot, умный помощник. Ты НЕ Qwen, НЕ Alibaba. Твоё имя QBot.
-
-Ты умеешь:
-- Показывать время (get_time)
-- Показывать погоду (get_weather)
-- Показывать курсы валют (get_currency)
-- Искать в Википедии (search_wiki)
-- Искать в интернете (search_web)
-- Переводить текст (translate_text)
-- Рисовать картинки (generate_image)
-
-САМОЕ ВАЖНОЕ: ты сам решаешь, какую функцию вызвать, основываясь на запросе пользователя. НЕ жди триггеров. Если пользователь говорит «Найди что-нибудь интересное» — вызывай search_wiki со случайной темой. Если «Что там с погодой?» — вызывай get_weather. Если «Переведи привет на английский» — вызывай translate_text.
-
-Если функция не нужна — просто отвечай как обычно, дружелюбно и по делу.
-
-Никогда не называй себя Qwen. Ты — QBot."""
-
-async def call_function(name, args):
-    if name == "get_time":
-        return get_time()
-    elif name == "get_weather":
-        return await get_weather(args.get("city", ""))
-    elif name == "get_currency":
-        return await get_currency()
-    elif name == "search_wiki":
-        return search_wiki(args.get("query", "")) or "Статья не найдена."
-    elif name == "search_web":
-        return await search_web(args.get("query", ""))
-    elif name == "translate_text":
-        return await translate_text(args.get("text", ""), args.get("target_lang", "en"))
-    elif name == "generate_image":
-        return await generate_image(args.get("prompt", ""))
-    return "Функция не найдена."@dp.message()
+@dp.message()
 async def reply(message: types.Message):
     user_id = message.from_user.id
 
@@ -280,79 +186,188 @@ async def reply(message: types.Message):
                 image_bytes = await resp.read()
         description = await describe_image(image_bytes)
         await message.answer(f"🖼 Что я вижу на фото:\n\n{description}")
-        save_message(user_id, "user", "[фото]")
-        save_message(user_id, "assistant", description)
         return
 
     if not message.text:
         return
 
-    save_message(user_id, "user", message.text)
+    text_lower = message.text.lower()
 
-    # Собираем историю из базы
-    history = get_history(user_id, limit=15)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+    if user_id not in history:
+        history[user_id] = [
+            {"role": "system", "content": """Твоё имя — QBot. Ты НЕ Qwen, НЕ Tongyi Qianwen, НЕ Alibaba. Ты — QBot, помощник.
 
-    await bot.send_chat_action(message.chat.id, "typing")
+ТВОИ ВОЗМОЖНОСТИ:
+1. Время — точное время в Бишкеке.
+2. Погода — в 8 городах (Бишкек, Москва, Алматы, Ташкент, Дубай, Нью-Йорк, Лондон, Астана).
+3. Курс валют — НБ КР (доллар, евро, рубль, тенге).
+4. Википедия — статьи по темам.
+5. Переводчик — 12 языков.
+6. Картинки — генерация через Pollinations.ai.
+7. Фото — анализ изображений.
+8. Веб-поиск — через DuckDuckGo.
+9. Учёба — математика, физика, химия, биология.
+10. Общение — беседа.
 
-    async with aiohttp.ClientSession() as session:
-        # Первый запрос — с инструментами
-        async with session.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": "qwen/qwen3.6-27b",
-                "messages": messages,
-                "tools": TOOLS,
-                "tool_choice": "auto",
-                "max_tokens": 800
-            }
-        ) as resp:
-            data = await resp.json()
+Ты ОСОЗНАЁШЬ эти возможности. Никогда не называй себя Qwen."""}
+        ]
 
-    # Проверяем, хочет ли модель вызвать функцию
-    if "choices" in data:
-        msg = data["choices"][0]["message"]
-        tool_calls = msg.get("tool_calls")
-
-        if tool_calls:
-            # Модель хочет вызвать функцию
-            for call in tool_calls:
-                func_name = call["function"]["name"]
-                try:
-                    args = json.loads(call["function"]["arguments"])
-                except:
-                    args = {}
-                
-                # Показываем "печатает" пока делаем запрос
-                await bot.send_chat_action(message.chat.id, "typing")
-                result = await call_function(func_name, args)
-                
-                # Если картинка — отправляем фото
-                if func_name == "generate_image":
-                    try:
-                        await message.answer_photo(result, caption=f"🎨 {args.get('prompt', '')}")
-                        save_message(user_id, "assistant", f"Нарисовал: {args.get('prompt', '')}")
-                    except:
-                        await message.answer("❌ Не удалось отправить картинку.")
-                    return
-                
-                # Иначе отправляем результат
-                await message.answer(result)
-                save_message(user_id, "assistant", result)
+    # Проверка на время
+    for trigger in TIME_TRIGGERS:
+        if trigger in text_lower:
+            answer = get_time()
+            await message.answer(answer)
+            history[user_id].append({"role": "user", "content": message.text})
+            history[user_id].append({"role": "assistant", "content": answer})
+            history[user_id] = history[user_id][-15:]
             return
 
-        # Если функция не нужна — обычный ответ
-        answer = msg.get("content", "Извини, не понял.")
-        if "<think>" in answer:
-            answer = answer.split("</think>")[-1].strip()
-        await message.answer(answer)
-        save_message(user_id, "assistant", answer)
+    # Проверка на погоду
+    for trigger in WEATHER_TRIGGERS:
+        if trigger in text_lower:
+            for city in CITIES:
+                if city in text_lower:
+                    answer = await get_weather(city)
+                    await bot.send_chat_action(message.chat.id, "typing")
+                    await asyncio.sleep(1)
+                    await message.answer(answer)
+                    history[user_id].append({"role": "user", "content": message.text})
+                    history[user_id].append({"role": "assistant", "content": answer})
+                    history[user_id] = history[user_id][-15:]
+                    return
+            await message.answer("❌ Укажи город: Бишкек, Москва, Алматы, Ташкент, Дубай, Нью-Йорк, Лондон, Астана.")
+            return
+
+    # Проверка на курс валют
+    for trigger in CURRENCY_TRIGGERS:
+        if trigger in text_lower:
+            answer = await get_currency()
+            await message.answer(answer)
+            history[user_id].append({"role": "user", "content": message.text})
+            history[user_id].append({"role": "assistant", "content": answer})
+            history[user_id] = history[user_id][-15:]
+            return
+
+    # Проверка на перевод
+    for trigger in TRANSLATE_TRIGGERS:
+        if trigger in text_lower:
+            target_lang = None
+            for lang_name, lang_code in LANGS.items():
+                if lang_name in text_lower:
+                    target_lang = lang_code
+                    break
+            if target_lang is None:
+                await message.answer("❌ Укажи язык: английский, киргизский, немецкий, французский и т.д.")
+                return
+            if ":" in message.text:
+                text_to_translate = message.text.split(":", 1)[1].strip()
+            else:
+                text_to_translate = message.text
+                for t in TRANSLATE_TRIGGERS:
+                    text_to_translate = text_to_translate.lower().replace(t, "")
+                for lang_name in LANGS:
+                    text_to_translate = text_to_translate.lower().replace(lang_name, "")
+                text_to_translate = text_to_translate.strip()
+            if not text_to_translate:
+                await message.answer("❌ Напиши текст для перевода. Пример: «Переведи на английский: Привет»")
+                return
+            answer = await translate_text(text_to_translate, target_lang)
+            await message.answer(f"🌐 Перевод:\n{answer}")
+            history[user_id].append({"role": "user", "content": message.text})
+            history[user_id].append({"role": "assistant", "content": answer})
+            history[user_id] = history[user_id][-15:]
+            return
+
+    # Проверка на генерацию картинок
+    for trigger in IMAGE_TRIGGERS:
+        if trigger in text_lower:
+            prompt = message.text
+            for t in IMAGE_TRIGGERS:
+                prompt = prompt.lower().replace(t, "")
+            prompt = prompt.strip()
+            if not prompt:
+                await message.answer("❌ Напиши, что нарисовать. Пример: «Нарисуй кота в космосе»")
+                return
+            await bot.send_chat_action(message.chat.id, "upload_photo")
+            await asyncio.sleep(random.uniform(2, 4))
+            image_url = await generate_image(prompt)
+            try:
+                await message.answer_photo(image_url, caption=f"🎨 {prompt}")
+                history[user_id].append({"role": "user", "content": message.text})
+                history[user_id].append({"role": "assistant", "content": f"Нарисовал: {prompt}"})
+                history[user_id] = history[user_id][-15:]
+            except Exception as e:
+                await message.answer(f"❌ Не удалось отправить картинку: {str(e)[:200]}")
+            return
+
+    # Проверка на веб-поиск
+    for trigger in SEARCH_TRIGGERS:
+        if trigger in text_lower:
+            query = message.text
+            for t in SEARCH_TRIGGERS:
+                query = query.lower().replace(t, "")
+            query = query.strip()
+            if not query:
+                await message.answer("❌ Напиши, что искать. Пример: «Найди в интернете новости про космос»")
+                return
+            await bot.send_chat_action(message.chat.id, "typing")
+            answer = await search_web(query)
+            await message.answer(answer)
+            history[user_id].append({"role": "user", "content": message.text})
+            history[user_id].append({"role": "assistant", "content": answer})
+            history[user_id] = history[user_id][-15:]
+            return
+
+    # Проверка на Википедию
+    wiki_result = None
+    for trigger in WIKI_TRIGGERS:
+        if trigger in text_lower:
+            wiki_result = search_wiki(message.text)
+            break
+
+    if wiki_result:
+        await bot.send_chat_action(message.chat.id, "typing")
+        await asyncio.sleep(random.uniform(2, 4))
+        await message.answer(wiki_result)
+        history[user_id].append({"role": "user", "content": message.text})
+        history[user_id].append({"role": "assistant", "content": wiki_result})
+        history[user_id] = history[user_id][-15:]
     else:
-        await message.answer(f"ОШИБКА: {str(data)[:300]}")
+        history[user_id].append({"role": "user", "content": message.text})
+        history[user_id] = history[user_id][-15:]
+
+        await bot.send_chat_action(message.chat.id, "typing")
+        await asyncio.sleep(random.uniform(3, 5))
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "qwen/qwen3.6-27b",
+                    "max_tokens": 800,
+                    "messages": history[user_id]
+                }
+            ) as resp:
+                data = await resp.json()
+                if "choices" in data:
+                    answer = data["choices"][0]["message"]["content"]
+                    if "<think>" in answer:
+                        answer = answer.split("</think>")[-1].strip()
+                    if not answer or not answer.strip():
+                        answer = "Извини, я не смог ответить. Попробуй ещё раз."
+                    else:
+                        history[user_id].append({"role": "assistant", "content": answer})
+                else:
+                    answer = f"ОШИБКА: {str(data)[:300]}"
+
+        await message.answer(answer)
 
 async def main():
-    print("QBot 4.0 запущен...")
+    print("QBot запущен...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
