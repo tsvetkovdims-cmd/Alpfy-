@@ -2,3 +2,4 @@ aiogram
 flask
 aiohttp
 wikipedia-api
+duckduckgo-search
