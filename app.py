@@ -1,6 +1,7 @@
 import asyncio
 import os
 import random
+import sqlite3
 from aiogram import Bot, Dispatcher, types
 import aiohttp
 import wikipediaapi
@@ -20,9 +21,50 @@ wiki = wikipediaapi.Wikipedia(
     language='ru'
 )
 
-history = {}
+# ========== БАЗА ДАННЫХ (ПОСТОЯННАЯ ПАМЯТЬ) ==========
+DB_PATH = "qbot_memory.db"
 
-# --- РАСШИРЕННЫЕ ТРИГГЕРЫ ---
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS memory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        role TEXT,
+        content TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.commit()
+    conn.close()
+
+def save_message(user_id, role, content):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO memory (user_id, role, content) VALUES (?, ?, ?)",
+              (user_id, role, content))
+    conn.commit()
+    conn.close()
+
+def get_history(user_id, limit=30):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT role, content FROM memory
+                 WHERE user_id = ?
+                 ORDER BY id DESC LIMIT ?""", (user_id, limit))
+    rows = c.fetchall()
+    conn.close()
+    return [{"role": r, "content": c} for r, c in reversed(rows)]
+
+def clear_history(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM memory WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+init_db()
+# ====================================================
+
 TIME_TRIGGERS = ["который час", "сколько времени", "текущее время", "время сейчас", "время в бишкеке", "сколько сейчас времени", "время"]
 WIKI_TRIGGERS = ["кто такой", "кто такая", "кто такое", "что такое", "что за", "расскажи про", "расскажи о", "расскажи", "информация о", "информация про", "информация", "найди про", "найди о", "найди", "википедия", "вики", "статья", "объясни", "объясни про", "определение"]
 WEATHER_TRIGGERS = ["погода", "погоду", "температура", "сколько градусов", "погодка", "холодно", "тепло", "дождь", "снег", "ветер", "климат"]
@@ -30,6 +72,7 @@ CURRENCY_TRIGGERS = ["курс", "доллар", "валюта", "сом", "ев
 TRANSLATE_TRIGGERS = ["переведи", "перевод", "как будет", "перевести"]
 IMAGE_TRIGGERS = ["нарисуй", "сгенерируй картинку", "нарисуй мне", "сгенерируй", "создай", "создай изображение", "нарисуй картинку", "изобрази"]
 SEARCH_TRIGGERS = ["найди в интернете", "поищи в интернете", "погугли", "загугли", "найди в сети", "поищи в сети", "найди онлайн", "поиск в интернете", "что пишут в интернете", "найди в гугле"]
+MEMORY_TRIGGERS = ["забудь всё", "очисти память", "сотри историю", "удали историю", "очисти историю"]
 
 CITIES = {
     "бишкек": (42.87, 74.59),
@@ -130,7 +173,6 @@ async def generate_image(prompt):
     return f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&safe=true"
 
 async def search_web(query):
-    """Поиск в интернете через DuckDuckGo."""
     try:
         from duckduckgo_search import DDGS
         with DDGS() as ddgs:
@@ -186,6 +228,8 @@ async def reply(message: types.Message):
                 image_bytes = await resp.read()
         description = await describe_image(image_bytes)
         await message.answer(f"🖼 Что я вижу на фото:\n\n{description}")
+        save_message(user_id, "user", "[фото]")
+        save_message(user_id, "assistant", description)
         return
 
     if not message.text:
@@ -193,33 +237,21 @@ async def reply(message: types.Message):
 
     text_lower = message.text.lower()
 
-    if user_id not in history:
-        history[user_id] = [
-            {"role": "system", "content": """Твоё имя — QBot. Ты НЕ Qwen, НЕ Tongyi Qianwen, НЕ Alibaba. Ты — QBot, помощник.
+    # Проверка на очистку памяти
+    for trigger in MEMORY_TRIGGERS:
+        if trigger in text_lower:
+            clear_history(user_id)
+            await message.answer("🧹 Память очищена. Начинаем с чистого листа!")
+            return
 
-ТВОИ ВОЗМОЖНОСТИ:
-1. Время — точное время в Бишкеке.
-2. Погода — в 8 городах (Бишкек, Москва, Алматы, Ташкент, Дубай, Нью-Йорк, Лондон, Астана).
-3. Курс валют — НБ КР (доллар, евро, рубль, тенге).
-4. Википедия — статьи по темам.
-5. Переводчик — 12 языков.
-6. Картинки — генерация через Pollinations.ai.
-7. Фото — анализ изображений.
-8. Веб-поиск — через DuckDuckGo.
-9. Учёба — математика, физика, химия, биология.
-10. Общение — беседа.
-
-Ты ОСОЗНАЁШЬ эти возможности. Никогда не называй себя Qwen."""}
-        ]
+    save_message(user_id, "user", message.text)
 
     # Проверка на время
     for trigger in TIME_TRIGGERS:
         if trigger in text_lower:
             answer = get_time()
             await message.answer(answer)
-            history[user_id].append({"role": "user", "content": message.text})
-            history[user_id].append({"role": "assistant", "content": answer})
-            history[user_id] = history[user_id][-15:]
+            save_message(user_id, "assistant", answer)
             return
 
     # Проверка на погоду
@@ -231,9 +263,7 @@ async def reply(message: types.Message):
                     await bot.send_chat_action(message.chat.id, "typing")
                     await asyncio.sleep(1)
                     await message.answer(answer)
-                    history[user_id].append({"role": "user", "content": message.text})
-                    history[user_id].append({"role": "assistant", "content": answer})
-                    history[user_id] = history[user_id][-15:]
+                    save_message(user_id, "assistant", answer)
                     return
             await message.answer("❌ Укажи город: Бишкек, Москва, Алматы, Ташкент, Дубай, Нью-Йорк, Лондон, Астана.")
             return
@@ -243,9 +273,7 @@ async def reply(message: types.Message):
         if trigger in text_lower:
             answer = await get_currency()
             await message.answer(answer)
-            history[user_id].append({"role": "user", "content": message.text})
-            history[user_id].append({"role": "assistant", "content": answer})
-            history[user_id] = history[user_id][-15:]
+            save_message(user_id, "assistant", answer)
             return
 
     # Проверка на перевод
@@ -273,9 +301,7 @@ async def reply(message: types.Message):
                 return
             answer = await translate_text(text_to_translate, target_lang)
             await message.answer(f"🌐 Перевод:\n{answer}")
-            history[user_id].append({"role": "user", "content": message.text})
-            history[user_id].append({"role": "assistant", "content": answer})
-            history[user_id] = history[user_id][-15:]
+            save_message(user_id, "assistant", answer)
             return
 
     # Проверка на генерацию картинок
@@ -293,9 +319,7 @@ async def reply(message: types.Message):
             image_url = await generate_image(prompt)
             try:
                 await message.answer_photo(image_url, caption=f"🎨 {prompt}")
-                history[user_id].append({"role": "user", "content": message.text})
-                history[user_id].append({"role": "assistant", "content": f"Нарисовал: {prompt}"})
-                history[user_id] = history[user_id][-15:]
+                save_message(user_id, "assistant", f"Нарисовал: {prompt}")
             except Exception as e:
                 await message.answer(f"❌ Не удалось отправить картинку: {str(e)[:200]}")
             return
@@ -313,9 +337,7 @@ async def reply(message: types.Message):
             await bot.send_chat_action(message.chat.id, "typing")
             answer = await search_web(query)
             await message.answer(answer)
-            history[user_id].append({"role": "user", "content": message.text})
-            history[user_id].append({"role": "assistant", "content": answer})
-            history[user_id] = history[user_id][-15:]
+            save_message(user_id, "assistant", answer)
             return
 
     # Проверка на Википедию
@@ -329,12 +351,27 @@ async def reply(message: types.Message):
         await bot.send_chat_action(message.chat.id, "typing")
         await asyncio.sleep(random.uniform(2, 4))
         await message.answer(wiki_result)
-        history[user_id].append({"role": "user", "content": message.text})
-        history[user_id].append({"role": "assistant", "content": wiki_result})
-        history[user_id] = history[user_id][-15:]
+        save_message(user_id, "assistant", wiki_result)
     else:
-        history[user_id].append({"role": "user", "content": message.text})
-        history[user_id] = history[user_id][-15:]
+        # Берём историю из базы
+        history = get_history(user_id, limit=30)
+        messages = [
+            {"role": "system", "content": """Твоё имя — QBot. Ты НЕ Qwen, НЕ Tongyi Qianwen, НЕ Alibaba. Ты — QBot, помощник.
+
+ТВОИ ВОЗМОЖНОСТИ:
+1. Время — точное время в Бишкеке.
+2. Погода — в 8 городах.
+3. Курс валют — НБ КР.
+4. Википедия — статьи.
+5. Переводчик — 12 языков.
+6. Картинки — генерация.
+7. Фото — анализ.
+8. Веб-поиск — DuckDuckGo.
+9. Учёба — математика, физика, химия, биология.
+10. Общение — беседа.
+
+Ты ОСОЗНАЁШЬ эти возможности. Никогда не называй себя Qwen."""}
+        ] + history
 
         await bot.send_chat_action(message.chat.id, "typing")
         await asyncio.sleep(random.uniform(3, 5))
@@ -349,7 +386,7 @@ async def reply(message: types.Message):
                 json={
                     "model": "qwen/qwen3.6-27b",
                     "max_tokens": 800,
-                    "messages": history[user_id]
+                    "messages": messages
                 }
             ) as resp:
                 data = await resp.json()
@@ -360,14 +397,14 @@ async def reply(message: types.Message):
                     if not answer or not answer.strip():
                         answer = "Извини, я не смог ответить. Попробуй ещё раз."
                     else:
-                        history[user_id].append({"role": "assistant", "content": answer})
+                        save_message(user_id, "assistant", answer)
                 else:
                     answer = f"ОШИБКА: {str(data)[:300]}"
 
         await message.answer(answer)
 
 async def main():
-    print("QBot запущен...")
+    print("QBot 4.0 запущен...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
