@@ -190,7 +190,7 @@ async def describe_image(image_bytes):
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     url = "https://api.groq.com/openai/v1/chat/completions"
     payload = {
-        "model": "qwen/qwen3.6-27b",
+        "model": "qwen/qwen3.8-27b",
         "messages": [
             {
                 "role": "user",
@@ -384,7 +384,7 @@ async def reply(message: types.Message):
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "qwen/qwen3.6-27b",
+                    "model": "qwen/qwen3.8-27b",
                     "max_tokens": 800,
                     "messages": messages
                 }
